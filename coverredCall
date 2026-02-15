@@ -1,5 +1,5 @@
 //@version=6
-indicator("Wheel Trader Smart V6.0 — Safe Wheel v2 (Tier + Rubber Band + Yield Gate)", overlay=true, max_labels_count=500)
+indicator("Test", overlay=true, max_labels_count=500)
 
 //=============================================================================
 // 1) Inputs
@@ -20,6 +20,11 @@ tierOverride = input.string("AUTO", "Tier Override",
 
 prefMode = input.string("AUTO", "Preference (when both possible)",
      options=["AUTO","CC_FIRST_IF_SHARES","PUT_FIRST_IF_CASH"], group=grp_state)
+
+// >>> NEW: Relaxation level
+grp_mode = "Signal Strictness"
+signalMode = input.string("BALANCED", "Signal Mode",
+     options=["STRICT","BALANCED","AGGRESSIVE"], group=grp_mode)
 
 grp_tech = "Technical Settings"
 emaFastLen = input.int(20,  "EMA Fast Length", minval=1, group=grp_tech)
@@ -54,9 +59,9 @@ cRsiOB = input.int(75, "Tier C RSI Overbought (CALL)", minval=50, maxval=95, gro
 
 // Yield Gate via ATR% (smoothed)
 atrPctSmoothLen = input.int(5, "ATR% Smooth Length", minval=1, group=grp_tier)
-aMinAtrPct = input.float(1.00, "Tier A Min ATR% (Yield Gate)", step=0.05, group=grp_tier)
-bMinAtrPct = input.float(1.20, "Tier B Min ATR% (Yield Gate)", step=0.05, group=grp_tier)
-cMinAtrPct = input.float(1.50, "Tier C Min ATR% (Yield Gate)", step=0.05, group=grp_tier)
+aMinAtrPct = input.float(1.20, "Tier A Min ATR% (Yield Gate)", step=0.05, group=grp_tier)
+bMinAtrPct = input.float(1.40, "Tier B Min ATR% (Yield Gate)", step=0.05, group=grp_tier)
+cMinAtrPct = input.float(2.20, "Tier C Min ATR% (Yield Gate)", step=0.05, group=grp_tier)
 
 grp_exp = "Expiry & Roll Rules"
 useManualExpiry = input.bool(false, "Manual Expiry Override?", group=grp_exp)
@@ -105,7 +110,7 @@ isHoldingSymbol =
      syminfo.ticker == "MAZDOCK" or
      syminfo.ticker == "CDSL" or
      syminfo.ticker == "NUVAMA" or
-     syminfo.ticker == "544277"    // BSE numeric ticker (if you chart BOM:544277)
+     syminfo.ticker == "544277"
 
 hasShares = isHoldingSymbol or manualHasShares
 
@@ -145,7 +150,28 @@ int rsiOBTier = tier == "TIER_A" ? aRsiOB : tier == "TIER_B" ? bRsiOB : cRsiOB
 float minAtrPctTier = tier == "TIER_A" ? aMinAtrPct : tier == "TIER_B" ? bMinAtrPct : cMinAtrPct
 
 //=============================================================================
-// 4) Helpers (DTE trading days, rounding, holidays)
+// 4) Mode relaxations (THIS is where boundaries loosen)
+//=============================================================================
+float yieldFactor = signalMode == "STRICT" ? 1.0 : signalMode == "BALANCED" ? 0.75 : 0.60
+int   rsiRelax    = signalMode == "STRICT" ? 0 : signalMode == "BALANCED" ? 3 : 5
+
+// Easier triggers:
+// - CALL: lower OB threshold by rsiRelax
+// - PUT:  raise OS threshold by rsiRelax
+int rsiOBAdj = math.max(50, rsiOBTier - rsiRelax)
+int rsiOSAdj = math.min(50, rsiOSTier + rsiRelax)
+
+// Trend guard buffer for CSP (allow slight dip below 200 EMA when relaxed)
+float trendBuf = signalMode == "STRICT" ? 1.00 : signalMode == "BALANCED" ? 0.99 : 0.97
+
+// Knife threshold relax (more negative => harder to trigger knife = more relaxed)
+float knifeThreshAdj = signalMode == "STRICT" ? knifeThresh : signalMode == "BALANCED" ? (knifeThresh * 1.25) : (knifeThresh * 1.50)
+
+// Snapback requirement disabled in AGGRESSIVE
+bool snapbackOn = useSnapback and signalMode != "AGGRESSIVE"
+
+//=============================================================================
+// 5) Helpers (DTE trading days, rounding, holidays)
 //=============================================================================
 dayms = 24 * 60 * 60 * 1000
 
@@ -154,9 +180,6 @@ roundDownToStep(x, step) =>
 
 roundUpToStep(x, step) =>
     step <= 0 ? x : math.ceil(x / step) * step
-
-clamp(x, lo, hi) =>
-    math.max(lo, math.min(hi, x))
 
 toMidnight(ts) =>
     timestamp(year(ts), month(ts), dayofmonth(ts), 0, 0)
@@ -170,11 +193,11 @@ var bool holInit = false
 
 initHolidays2026_minimal() =>
     array.clear(hol)
-    array.push(hol, timestamp(2026, 1, 26, 0, 0))  // Republic Day
-    array.push(hol, timestamp(2026, 4, 3,  0, 0))  // Good Friday
-    array.push(hol, timestamp(2026, 5, 1,  0, 0))  // Maharashtra Day
-    array.push(hol, timestamp(2026, 10, 2, 0, 0))  // Gandhi Jayanti
-    array.push(hol, timestamp(2026, 12, 25,0, 0))  // Christmas
+    array.push(hol, timestamp(2026, 1, 26, 0, 0))
+    array.push(hol, timestamp(2026, 4, 3,  0, 0))
+    array.push(hol, timestamp(2026, 5, 1,  0, 0))
+    array.push(hol, timestamp(2026, 10, 2, 0, 0))
+    array.push(hol, timestamp(2026, 12, 25,0, 0))
 
 if not holInit
     initHolidays2026_minimal()
@@ -210,7 +233,7 @@ tradingDaysToExpiry(nowTs, expTs, maxDays) =>
         cnt
 
 //=============================================================================
-// 5) Monthly Expiry (NSE: last Thursday; if holiday shift not modeled here)
+// 6) Monthly Expiry (NSE: last Thursday; holiday shift not modeled)
 //=============================================================================
 lastThursdayTs(y, m) =>
     nextMonth = m == 12 ? 1 : m + 1
@@ -225,7 +248,7 @@ lastThursdayTs(y, m) =>
     out
 
 monthlyExpiryTs(y, m) =>
-    lastThursdayTs(y, m) + 15 * 60 * 60 * 1000 + 30 * 60 * 1000  // 15:30
+    lastThursdayTs(y, m) + 15 * 60 * 60 * 1000 + 30 * 60 * 1000
 
 autoExpiryByRollRule(nowTs) =>
     int y = year(nowTs)
@@ -265,7 +288,7 @@ dteToPctTradingTier(td, pctS, pctL) =>
     pct
 
 //=============================================================================
-// 6) Core Indicators (EMA/ATR/RSI/BB)
+// 7) Core Indicators (EMA/ATR/RSI/BB)
 //=============================================================================
 emaFast = ta.ema(close, emaFastLen)
 emaSlow = ta.ema(close, emaSlowLen)
@@ -277,30 +300,31 @@ bbDev   = bbMult * ta.stdev(close, bbLen)
 bbUpper = bbBasis + bbDev
 bbLower = bbBasis - bbDev
 
-// Rubber-band touches
 touchUpper = high >= bbUpper
 touchLower = low  <= bbLower
 
-// Optional "snap back inside band" confirmation
-rbCallOk = useSnapback ? (touchUpper and close < bbUpper) : touchUpper
-rbPutOk  = useSnapback ? (touchLower and close > bbLower) : touchLower
+rbCallOk = snapbackOn ? (touchUpper and close < bbUpper) : touchUpper
+rbPutOk  = snapbackOn ? (touchLower and close > bbLower) : touchLower
 
-// Falling knife filter (normalized slope)
+// Knife / breakdown
 slopeNorm      = atr > 0 ? (emaFast - emaFast[slopeLookback]) / atr : 0.0
-isFallingKnife = slopeNorm < knifeThresh
+isFallingKnife = slopeNorm < knifeThreshAdj
 
 swingLow  = ta.lowest(low, swingLen)[1]
 breakdown = not na(swingLow) and close < swingLow and (high - low) > 1.2 * atr
 
 //=============================================================================
-// 7) Yield Gate (ATR% filter)
+// 8) Yield Gate (ATR% filter) — relaxed by mode
 //=============================================================================
-atrPct      = close > 0 ? (atr / close) * 100.0 : 0.0
-atrPctSm    = ta.sma(atrPct, atrPctSmoothLen)
-yieldOk     = atrPctSm >= minAtrPctTier
+atrPct   = close > 0 ? (atr / close) * 100.0 : 0.0
+atrPctSm = ta.sma(atrPct, atrPctSmoothLen)
+
+minAtrPctAdj = minAtrPctTier * yieldFactor
+yieldOk      = atrPctSm >= minAtrPctAdj
+yieldLow     = not yieldOk
 
 //=============================================================================
-// 8) Earnings Risk (best-effort; may be NA for many India symbols)
+// 9) Earnings Risk
 //=============================================================================
 var bool earningsRisk = false
 if avoidEarnings
@@ -316,7 +340,7 @@ else
     earningsRisk := false
 
 //=============================================================================
-// 9) Expiry selection + Strike Targets (Tiered OTM% + ATR guard)
+// 10) Expiry selection + Strike Targets (Tiered OTM% + ATR guard)
 //=============================================================================
 manualExpiryTs = timestamp(manYear, manMonth, manDay, manHour, manMin)
 autoExp        = autoExpiryByRollRule(time)
@@ -333,31 +357,44 @@ putStrike  = roundDownToStep(close - distFinal, strikeStep)
 callStrike = roundUpToStep(close + distFinal, strikeStep)
 
 //=============================================================================
-// 10) Safe Wheel v2 Signals (Traffic-Light Logic)
+// 11) Relaxed Signal Logic (SELL CALL / SELL PUT)
 //=============================================================================
-// Trend Guard: BLOCK CSP below 200 EMA
-trendOkForPut = close > emaSlow
+// Trend Guard (relaxed by buffer)
+trendOkForPut = close > emaSlow * trendBuf
 
-// CALL setup: Overextended (upper band + RSI overbought)
-callSetup = hasShares and rbCallOk and rsi >= rsiOBTier
+// Setup logic by mode (relaxed boundaries)
+callSetupStrict   = hasShares and rbCallOk and rsi >= rsiOBAdj
+callSetupBalanced = hasShares and rsi >= rsiOBAdj and (rbCallOk or close > bbBasis)
+callSetupAgg      = hasShares and (rsi >= rsiOBAdj or rbCallOk)
 
-// PUT setup: Oversold but NOT a falling knife (lower band + RSI oversold + trend guard)
-putSetup  = cashSecured and trendOkForPut and rbPutOk and rsi <= rsiOSTier
+putSetupStrict    = cashSecured and trendOkForPut and rbPutOk and rsi <= rsiOSAdj
+putSetupBalanced  = cashSecured and trendOkForPut and rsi <= rsiOSAdj and (rbPutOk or close < bbBasis)
+putSetupAgg       = cashSecured and trendOkForPut and (rsi <= rsiOSAdj or rbPutOk)
 
-// Global blockers
-blockers = earningsRisk or isFallingKnife or breakdown or not yieldOk
+callSetup = signalMode == "STRICT" ? callSetupStrict : signalMode == "BALANCED" ? callSetupBalanced : callSetupAgg
+putSetup  = signalMode == "STRICT" ? putSetupStrict  : signalMode == "BALANCED" ? putSetupBalanced  : putSetupAgg
 
-sellCallNow = callSetup and not blockers
-sellPutNow  = putSetup  and not blockers
+// Blockers by mode
+hardBlock = earningsRisk
 
-// Resolve ACTION
+callBlocked = hardBlock or (signalMode == "STRICT" ? (yieldLow or isFallingKnife or breakdown) :
+                            signalMode == "BALANCED" ? (yieldLow or isFallingKnife) :
+                            false)
+
+putBlocked  = hardBlock or (signalMode == "STRICT" ? (yieldLow or isFallingKnife or breakdown) :
+                            signalMode == "BALANCED" ? (yieldLow or isFallingKnife) :
+                            isFallingKnife)
+
+// Final signals
+sellCallNow = callSetup and not callBlocked
+sellPutNow  = putSetup  and not putBlocked
+
 signal = "WAIT"
 if prefMode == "CC_FIRST_IF_SHARES"
     signal := sellCallNow ? "SELL CALL NOW" : (sellPutNow ? "SELL PUT NOW" : "WAIT")
 else if prefMode == "PUT_FIRST_IF_CASH"
     signal := sellPutNow ? "SELL PUT NOW" : (sellCallNow ? "SELL CALL NOW" : "WAIT")
 else
-    // AUTO: if both, prefer PUT when you have no shares; otherwise prefer CALL
     if sellPutNow and not hasShares
         signal := "SELL PUT NOW"
     else if sellCallNow
@@ -368,7 +405,7 @@ else
         signal := "WAIT"
 
 //=============================================================================
-// 11) Visuals
+// 12) Visuals
 //=============================================================================
 plot(showEMAs ? emaSlow : na, "EMA 200", color=color.new(color.blue, 15), linewidth=2)
 plot(showEMAs ? emaFast : na, "EMA Fast", color=color.new(color.orange, 0), linewidth=2)
@@ -380,91 +417,138 @@ plot(showBB ? bbLower : na, "BB Lower", color=color.new(color.gray, 40))
 plot(showTargets ? callStrike : na, "CC Strike Target", color=color.new(color.red, 0), style=plot.style_circles)
 plot(showTargets ? putStrike  : na, "CSP Strike Target", color=color.new(color.green, 0), style=plot.style_circles)
 
-// Weekly labels (optional)
 isNewWeek = timeframe.change("W")
 if showLabels and isNewWeek and signal == "SELL PUT NOW"
     label.new(bar_index, low,
-      "SELL PUT NOW\nTier: " + tier +
+      "SELL PUT NOW\nTier: " + tier + " | Mode: " + signalMode +
       "\nCSP Strike: " + str.tostring(putStrike, "#.0") +
       "\nDTE(TD): " + str.tostring(dteTD) +
       "\nOTM%: " + str.tostring(pctOTM * 100, "#.1") + "%" +
-      "\nATR%: " + str.tostring(atrPctSm, "#.2") + " (gate " + str.tostring(minAtrPctTier, "#.2") + ")",
+      "\nATR%: " + str.tostring(atrPctSm, "#.2") + " (min " + str.tostring(minAtrPctAdj, "#.2") + ")",
       style=label.style_label_up, color=color.new(color.green, 0), textcolor=color.white)
 
 if showLabels and isNewWeek and signal == "SELL CALL NOW"
     label.new(bar_index, high,
-      "SELL CALL NOW\nTier: " + tier +
+      "SELL CALL NOW\nTier: " + tier + " | Mode: " + signalMode +
       "\nCC Strike: " + str.tostring(callStrike, "#.0") +
       "\nDTE(TD): " + str.tostring(dteTD) +
       "\nOTM%: " + str.tostring(pctOTM * 100, "#.1") + "%" +
-      "\nATR%: " + str.tostring(atrPctSm, "#.2") + " (gate " + str.tostring(minAtrPctTier, "#.2") + ")",
+      "\nATR%: " + str.tostring(atrPctSm, "#.2") + " (min " + str.tostring(minAtrPctAdj, "#.2") + ")",
       style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white)
 
 //=============================================================================
-// 12) Traffic Light Dashboard (Why GO / NO-GO)
+// 13) Traffic Light Dashboard (FIXED)
 //=============================================================================
-var table t = table.new(position.top_right, 2, 12, border_width=1)
+var table t = table.new(position.top_right, 2, 13, border_width=1)
 
+// --- FIX: avoid multi-line ternary inside functions (Pine parser issue)
 trafficColor(sig) =>
-    sig == "SELL PUT NOW"  ? color.new(color.green, 0) :    sig == "SELL CALL NOW" ? color.new(color.red, 0)   :
-                             color.new(color.gray, 0)
+    color c = color.new(color.gray, 0)
+    if sig == "SELL PUT NOW"
+        c := color.new(color.green, 0)
+    else if sig == "SELL CALL NOW"
+        c := color.new(color.red, 0)
+    c
 
-yesNoColor(cond) =>
-    cond ? color.new(color.green, 0) : color.new(color.red, 0)
+modeColor(m) =>
+    color c = color.new(color.orange, 0)
+    if m == "STRICT"
+        c := color.new(color.red, 0)
+    else if m == "BALANCED"
+        c := color.new(color.orange, 0)
+    else
+        c := color.new(color.green, 0)
+    c
 
-warnColor(cond) =>
-    cond ? color.new(color.orange, 0) : color.new(color.green, 0)
+reasonText() =>
+    if signal != "WAIT"
+        "GO"
+    else
+        if callSetup and callBlocked
+            "CALL blocked"
+        else if putSetup and putBlocked
+            "PUT blocked"
+        else
+            "No setup (BB/RSI)"
 
 blockerText() =>
     string s = ""
-    s += earningsRisk ? "EARN " : ""
-    s += not yieldOk ? "YIELD_LOW " : ""
-    s += isFallingKnife ? "KNIFE " : ""
-    s += breakdown ? "BREAKDOWN " : ""
+    if earningsRisk
+        s := s + "EARN "
+
+    if signalMode == "STRICT"
+        if yieldLow
+            s := s + "YIELD_LOW "
+        if isFallingKnife
+            s := s + "KNIFE "
+        if breakdown
+            s := s + "BREAKDOWN "
+    else if signalMode == "BALANCED"
+        if yieldLow
+            s := s + "YIELD_LOW "
+        if isFallingKnife
+            s := s + "KNIFE "
+        if breakdown
+            s := s + "BREAKDOWN(warn) "
+    else
+        if isFallingKnife
+            s := s + "KNIFE(CSP) "
+        if yieldLow
+            s := s + "YIELD_LOW(warn) "
+        if breakdown
+            s := s + "BREAKDOWN(warn) "
+
     s == "" ? "NONE" : s
 
 if showPanel and barstate.islast
-    table.clear(t, 0, 0, 1, 11)
+    // 2 columns (0..1), 13 rows (0..12)
+    table.clear(t, 0, 0, 1, 12)
+
     table.cell(t, 0, 0, "Safe Wheel v2 — " + syminfo.ticker, bgcolor=color.new(color.black, 0), text_color=color.white)
     table.cell(t, 1, 0, "Spot: " + str.tostring(close, "#.2"), bgcolor=color.new(color.black, 0), text_color=color.white)
 
     table.cell(t, 0, 1, "Detected Tier")
-    table.cell(t, 1, 1, tier, bgcolor=tier=="TIER_A"?color.new(color.green,0):tier=="TIER_B"?color.new(color.orange,0):color.new(color.red,0), text_color=color.white)
+    table.cell(t, 1, 1, tier,
+      bgcolor=tier=="TIER_A"?color.new(color.green,0):tier=="TIER_B"?color.new(color.orange,0):color.new(color.red,0),
+      text_color=color.white)
 
-    table.cell(t, 0, 2, "ACTION")
-    table.cell(t, 1, 2, signal, bgcolor=trafficColor(signal), text_color=color.white)
+    table.cell(t, 0, 2, "Signal Mode")
+    table.cell(t, 1, 2, signalMode, bgcolor=modeColor(signalMode), text_color=color.white)
 
-    table.cell(t, 0, 3, "State")
-    table.cell(t, 1, 3, (hasShares ? "SHARES" : "NO SHARES") + " | " + (cashSecured ? "CASH OK" : "NO CASH"),
+    table.cell(t, 0, 3, "ACTION")
+    table.cell(t, 1, 3, signal, bgcolor=trafficColor(signal), text_color=color.white)
+
+    table.cell(t, 0, 4, "Reason")
+    table.cell(t, 1, 4, reasonText(), bgcolor=color.new(color.gray, 70), text_color=color.white)
+
+    table.cell(t, 0, 5, "State")
+    table.cell(t, 1, 5, (hasShares ? "SHARES" : "NO SHARES") + " | " + (cashSecured ? "CASH OK" : "NO CASH"),
       bgcolor=hasShares ? color.new(color.green, 0) : color.new(color.gray, 0), text_color=color.white)
 
-    table.cell(t, 0, 4, "Trend (200 EMA)")
-    table.cell(t, 1, 4, trendOkForPut ? "BULLISH" : "BEARISH (CSP BLOCK)",
+    table.cell(t, 0, 6, "Trend (200 EMA)")
+    table.cell(t, 1, 6, trendOkForPut ? "OK" : "BEARISH (CSP BLOCK)",
       bgcolor=trendOkForPut ? color.new(color.green, 0) : color.new(color.red, 0), text_color=color.white)
 
-    table.cell(t, 0, 5, "Premium Yield (ATR%)")
-    table.cell(t, 1, 5, str.tostring(atrPctSm, "#.2") + "% (min " + str.tostring(minAtrPctTier, "#.2") + "%)",
-      bgcolor=warnColor(not yieldOk), text_color=color.white)
+    table.cell(t, 0, 7, "Premium Yield (ATR%)")
+    table.cell(t, 1, 7, str.tostring(atrPctSm, "#.2") + "% (min " + str.tostring(minAtrPctAdj, "#.2") + "%)",
+      bgcolor=yieldLow ? color.new(color.orange, 0) : color.new(color.green, 0), text_color=color.white)
 
-    table.cell(t, 0, 6, "Rubber Band")
-    rbTxt = "Up:" + (rbCallOk ? "Y" : "N") + " | Lo:" + (rbPutOk ? "Y" : "N")
-    table.cell(t, 1, 6, rbTxt, bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(t, 0, 8, "Rubber Band")
+    string rbTxt = "Up:" + (rbCallOk ? "Y" : "N") + " | Lo:" + (rbPutOk ? "Y" : "N")
+    table.cell(t, 1, 8, rbTxt, bgcolor=color.new(color.gray, 70), text_color=color.white)
 
-    table.cell(t, 0, 7, "RSI vs Tier")
-    rsiTxt = str.tostring(rsi, "#.1") + " | OS≤" + str.tostring(rsiOSTier) + " OB≥" + str.tostring(rsiOBTier)
-    table.cell(t, 1, 7, rsiTxt, bgcolor=color.new(color.gray, 70), text_color=color.white)
+    table.cell(t, 0, 9, "RSI vs Tier")
+    string rsiTxt = str.tostring(rsi, "#.1") + " | OS≤" + str.tostring(rsiOSAdj) + " OB≥" + str.tostring(rsiOBAdj)
+    table.cell(t, 1, 9, rsiTxt, bgcolor=color.new(color.gray, 70), text_color=color.white)
 
-    table.cell(t, 0, 8, "Blockers")
-    table.cell(t, 1, 8, blockerText(), bgcolor=blockers ? color.new(color.red, 0) : color.new(color.green, 0), text_color=color.white)
+    table.cell(t, 0, 10, "Blockers")
+    table.cell(t, 1, 10, blockerText(),
+      bgcolor=(earningsRisk ? color.new(color.red, 0) : color.new(color.gray, 70)), text_color=color.white)
 
-    table.cell(t, 0, 9, "Expiry")
-    table.cell(t, 1, 9, str.format("{0,date,yyyy-MM-dd}", expiryTs) + " | " + str.tostring(dteTD) + " TD",
+    table.cell(t, 0, 11, "Expiry / DTE")
+    table.cell(t, 1, 11, str.format("{0,date,yyyy-MM-dd}", expiryTs) + " | " + str.tostring(dteTD) + " TD",
       bgcolor=color.new(color.gray, 70), text_color=color.white)
 
-    table.cell(t, 0, 10, "Targets")
-    table.cell(t, 1, 10, "CSP: " + str.tostring(putStrike, "#.0") + " | CC: " + str.tostring(callStrike, "#.0"),
+    table.cell(t, 0, 12, "Targets")
+    table.cell(t, 1, 12, "CSP: " + str.tostring(putStrike, "#.0") + " | CC: " + str.tostring(callStrike, "#.0"),
       bgcolor=color.new(color.gray, 70), text_color=color.white)
-
-    table.cell(t, 0, 11, "Notes")
-    note = useSnapback ? "Snapback ON" : "Snapback OFF"
-    table.cell(t, 1, 11, note, bgcolor=color.new(color.gray, 70), text_color=color.white)
